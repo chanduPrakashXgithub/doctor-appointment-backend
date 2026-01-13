@@ -7,7 +7,9 @@ import Doctor from "../models/Doctor.js";
 import { sendWhatsAppNotification } from "./notificationController.js";
 
 dotenv.config();
+
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:5173";
 
 export const processPayment = async (req, res) => {
   try {
@@ -17,14 +19,24 @@ export const processPayment = async (req, res) => {
       return res.status(400).json({ success: false, message: "Missing required fields" });
     }
 
-    const amount = 1; // ₹1 test
+    // Get doctor fees
+    const doctor = await Doctor.findById(doctorId);
+    if (!doctor) {
+      return res.status(404).json({ success: false, message: "Doctor not found" });
+    }
+
+    const amount = doctor.fees || 500; // Use doctor's fees or default
     const currency = "inr";
 
     const paymentIntent = await stripe.paymentIntents.create({
-      amount: amount * 100,
+      amount: amount * 100, // Convert to paise
       currency,
       payment_method: paymentMethodId,
       confirm: true,
+      automatic_payment_methods: {
+        enabled: true,
+        allow_redirects: "never",
+      },
     });
 
     if (paymentIntent.status !== "succeeded") {
@@ -51,7 +63,6 @@ export const processPayment = async (req, res) => {
     }
 
     const user = await User.findById(req.user.id);
-    const doctor = await Doctor.findById(doctorId);
 
     const appointmentTime = new Date(`${appointment.date.toISOString().split("T")[0]}T${appointment.startTime}`);
     if (user?.phone && doctor?.name) {
@@ -73,28 +84,36 @@ export const createCheckoutSession = async (req, res) => {
       return res.status(401).json({ success: false, message: "Unauthorized" });
     }
 
+    // Get doctor info for better checkout experience
+    const doctor = await Doctor.findById(doctorId);
+    const productName = doctor
+      ? `Appointment with Dr. ${doctor.name}`
+      : "Doctor Appointment Fee";
+
     const session = await stripe.checkout.sessions.create({
-      payment_method_types: ['card', 'upi'],
+      payment_method_types: ['card'],
       line_items: [
         {
           price_data: {
             currency: 'inr',
             product_data: {
-              name: 'Doctor Appointment Fee',
+              name: productName,
+              description: `Consultation fee for medical appointment`,
             },
-            unit_amount: amount * 100, // ₹ to paise
+            unit_amount: (amount || 500) * 100, // ₹ to paise
           },
           quantity: 1,
         },
       ],
       mode: 'payment',
-      success_url: `http://localhost:5173/confirmation`,
-      cancel_url: `http://localhost:5173/checkout?cancelled=true`,
+      success_url: `${FRONTEND_URL}/confirmation?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${FRONTEND_URL}/checkout?cancelled=true`,
       metadata: {
         userId: req.user.id,
         doctorId,
         appointmentId,
       },
+      customer_email: req.user.email,
     });
 
     res.status(200).json({ sessionId: session.id, url: session.url });
